@@ -1,0 +1,363 @@
+---
+title: "Mimic_Proj_PnuemoniaInfluenza"
+author: "kd91"
+date: "5/15/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+# Importing Data into R
+```{r}
+library(caret)
+library(ggplot2)
+library(randomForest)
+library(corrplot)
+library(imputeMissings)
+library(forcats)
+library(glmnet)
+library(kernlab)
+library(rpart.plot)
+library(pROC)
+
+setwd("~/Documents/KHUSHBU/MS/Spring2020/614_CDSS/MIMIC 3 Project")
+
+df0 <- read.csv(file="data_pneumoniacohort.csv", header=TRUE)
+```
+# EDA
+```{r}
+# copying df for modifying and analyzing
+df1 = df0[2:34]
+
+# change below variables to appropriate type
+df1$dischtime <- as.POSIXct(df1$dischtime)
+df1$diagnosis <- as.character(df1$diagnosis)
+df1$first_admittime <- as.POSIXct(df1$first_admittime)
+# df1$expire_flag <- factor(df1$expire_flag)
+df1$albumin <- as.numeric(df1$albumin)
+df1$platelet_count <- as.numeric(df1$platelet_count)
+
+# adding los to df1 from admittime & dischtime
+df1$los <- difftime(df1$dischtime, df1$first_admittime, units = c("days"))
+df1$los <- round(df1$los, digits = 0)
+df1$los <- as.numeric(df1$los)
+```
+### Correlation
+```{r}
+# correlation withonly numeric variables:
+df1_num <- dplyr::select_if(df1, is.numeric)
+cor <- cor(df1_num,use = "pairwise.complete.obs", method = "pearson")
+corrplot(cor)
+# highly positive correlations are seen are between:
+# platelet_count & los
+# age and expire_flag
+# max_bp & los
+```
+## Cleaning impossible values
+```{r}
+# age cannot be more than 110, making these age values to 99
+df1$age <- ifelse(df1$age > 110, 99,df1$age)
+```
+# Vizualizations
+```{r}
+hist(df1$age, col="grey",main="Distribution of patient's age", xlab="Patient's age", ylab="Count")
+hist(df1$expire_flag)
+# there is a larger populatio of patients that are dead than in the dataset than being alive
+# plot indicates no class imbalancein the dataset
+
+g1 = ggplot(df1, aes(x=age,y=hb,col=factor(expire_flag)))
+g1 + geom_point()+ ggtitle("Distribution of patient's age and haemoglobin colored by mortality") +  
+  xlab("Distribution of patient's age") + ylab("Patient's haemoglobin")
+# Older patients with less haemoglobin(hb) have higher chance of mortality than younger patients with normal hb levels
+
+g2 = ggplot(df1, aes(x=factor(expire_flag), y=age))
+g2 + geom_boxplot()+ ggtitle("Distribution of patient's age colored by mortality") +  
+  xlab("Patient Mortality(0=Alive, 1=Dead)") + ylab("Patient's age")
+# For patients that are dead, the median age is higher than patients that are alive
+
+g3 = ggplot(df1, aes(x=factor(expire_flag), y=platelet_count))
+g3 + geom_boxplot()+ ggtitle("Distribution of patient's platelet count colored by mortality") +  
+  xlab("Patient Mortality(0=Alive, 1=Dead)") + ylab("Patient's platelet count levels")
+# Platelet count of patients did not have much impact on patient's mortality
+
+g4 = ggplot(df1, aes(x=albumin, col=factor(expire_flag)))
+g4 + geom_histogram(bins=40)+ ggtitle("Distribution of patient's albumin levels colored by mortality") +  
+  xlab("Patient Mortality(0=Alive, 1=Dead)") + ylab("Patient's albumin levels")
+# For patients that didn't survive, the albumin levels observed are higher than other patients
+
+plot(table(df1$gender,df1$expire_flag), main="Distribution of martality by gender", xlab="Patient's gender",
+     ylab="Patient Mortality(0=Alive, 1=Dead)")
+# Plot indicates that there is not much difference between mortality of patients being either male or female
+```
+## Data Cleaning
+```{r}
+# remove redundant variables
+# hadm_id,icustayid removed since subject_id suffices
+# discahrge_location gives same info as expire_flag
+# first_admittime,dischtime accounted into los variable
+# diagnosis,short_title,long_title accounted for in icd9_list
+# firstcareunits removed, since all patients have ICU admissions
+df2 <- subset(df1, select = -c(subject_id,hadm_id,discharge_location,first_admittime,dischtime,icustayid,
+                               diagnosis,short_title,long_title, religion, firstcareunits))
+summary(df2)
+
+# variables to drop: with more than 50% NA's(=3270)
+# o2_saturation: NA's : 7439
+# peak_flow: NA's : 6894
+# total_protein: NA's :6475
+## hb: NA's   :4406
+# crp: NA's :6882
+# albumin_urine: NA's :7350
+# urea_nitrogen: NA's :5209
+## creatinine_urine: NA's   :4097 
+# urea_nitrogen: NA's   :5209
+# weight: NA's   :4222
+# height: NA's   :5497 
+# comorbidities: NA's:7387
+# smoking_history: NA's: :5865
+## max_bp : NAs : 4235
+
+# df3 = df2
+# df3 <- na.omit(df3[, c(8,12,17)])
+# results in only complete cases with 500 rows if non-NA values of hb,creatinine_urine and max_bp are included 
+  
+df2 <- subset(df2, select = -c(o2_saturation,peak_flow,total_protein,hb,crp,albumin_urine,
+                               urea_nitrogen,creatinine_urine,urea_nitrogen,max_bp,weight,
+                               height,comorbidities,smoking_history))
+
+#combining similar levels into one
+levels(df2$ethnicity)
+levels(df2$ethnicity)[c(1:2,23:30)] <- "OTHER"
+levels(df2$ethnicity)[2:8] <- "ASIAN"
+levels(df2$ethnicity)[3:6] <- "BLACK/AFRICAN AMERICAN"
+levels(df2$ethnicity)[4:12] <- "HISPANIC/LATINO"
+levels(df2$ethnicity)[5:9] <- "WHITE"
+
+# icd9 codes details:
+# http://www.icd9data.com/2015/Volume1/460-519/480-488/default.htm
+levels(df2$icd9_list)
+df2$icd9_list <- fct_collapse(df2$icd9_list, Viral_pneumonia="486",Methicillin_susp_pneumonia_Staph="48241",
+                              Pneumonia_Pseudomonas="4821",Bacterial_pneumonia="4829",
+                              Pneumonia_other_gram_neg_bacteria ="48283",Pneumococcal_pneumonia = "481",
+                              other_level = "Others")
+summary(df2)
+
+#correlation for variables within cleaned dataset
+cor2 <- cor(df2[c(5:6,8:10)], use = "pairwise.complete.obs", method = "pearson")
+corrplot(cor2) 
+# highly positive correlations that are seen are between:
+# platelet_count & los
+# age and expire_flag
+
+df2$expire_flag <- factor(df2$expire_flag)
+```
+# Modeling
+## Splitting train-test data and imputation of NA's
+```{r}
+set.seed(1000)
+
+intrain <- createDataPartition(y = df2$expire_flag, p= 0.7, list = FALSE)
+training <- df2[intrain,]
+testing <- df2[-intrain,]
+dim(intrain); dim(training); dim(testing)
+
+# impute with median/mode on train data
+values <- compute(training)
+training_imp <- impute(training,object=values)
+#impute on test data
+testing_imp <- impute(testing,object=values)
+
+levels(training_imp$expire_flag) <- c("N", "Y")
+levels(testing_imp$expire_flag) <- c("N", "Y")
+```
+## Elastic net Regression
+```{r}
+set.seed(1001)
+trctrl_net <- trainControl(summaryFunction=twoClassSummary,classProbs = TRUE,# Use AUC to pick the best model
+                           method = "repeatedcv", number = 5, repeats = 3)
+                           
+# grid_net <- expand.grid(alpha = 0:1,lambda = seq(0.0001, 1, length = 20))
+# model_net_grid <- train(expire_flag ~., data = training_imp, method = "glmnet",
+#                    trControl=trctrl_net, preProcess = c("center", "scale"),
+#                   tuneGrid = grid_net,tuneLength = 10)
+# better results are obtained without gridsearch
+
+model_net <- train(expire_flag ~., data = training_imp, method = "glmnet",
+                   trControl=trctrl_net, preProcess = c("center", "scale"),
+                   metric="ROC",tuneLength = 10)
+model_net
+plot(model_net) # regularization parameter plot
+
+# standardizes test data the same way as the training data 
+test_pred_net <- predict(model_net, newdata = testing_imp)
+
+confusionMatrix(test_pred_net, testing_imp$expire_flag, positive="Y")
+
+rfProbs_net <- predict(model_net, testing_imp, type = "prob")
+rfROC_net <- roc(testing_imp$expire_flag, rfProbs_net[, "Y"])
+plot.roc(rfROC_net, print.auc=TRUE, legacy.axes=TRUE) 
+# AUC = 0.702
+```
+## SVM - Linear
+```{r}
+set.seed(2001)
+
+trctrl_svm <- trainControl(summaryFunction=twoClassSummary,classProbs = TRUE,# Use AUC to pick the best model
+                       method = "repeatedcv", number = 5, repeats = 3)
+
+grid_svm <- expand.grid(C = c(0.005,0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2,5))
+# grid gave slightly better predictions than the default C values. C=1 when run with defaults
+
+svm_Linear_Grid <- train(expire_flag ~., data = training_imp, method = "svmLinear",
+                         trControl=trctrl_svm,
+                         preProcess = c("center", "scale"), 
+                         metric = "ROC",tuneLength = 10) # removed tuneGrid = grid_svm
+svm_Linear_Grid 
+svm_Linear_Grid$bestTune # C = 1
+
+test_pred_svmlinear <- predict(svm_Linear_Grid, newdata = testing_imp)
+
+confusionMatrix(testing_imp$expire_flag, test_pred_svmlinear, positive="Y")
+
+rfProbs_svmlinear <- predict(svm_Linear_Grid, testing_imp, type = "prob")
+rfROC_svmlinear <- roc(testing_imp$expire_flag, rfProbs_svmlinear[, "Y"])
+plot.roc(rfROC_svmlinear, print.auc=TRUE, legacy.axes=TRUE) 
+# AUC = 0.686
+```
+## SVM - Poly
+```{r}
+set.seed(2002)
+
+trctrl_svmPoly <- trainControl(summaryFunction=twoClassSummary,classProbs = TRUE,# Use AUC to pick the best model
+                                 method = "cv", number = 3)
+
+# grid search taking too long for svmPoly, runnign model on defaults
+
+svm_Poly <- train(expire_flag ~., data = training_imp, method = "svmPoly",
+                         trControl=trctrl_svmPoly,
+                         preProcess = c("center", "scale"),
+                         metric="ROC",
+                         tuneLength = 3)
+svm_Poly
+# degree = 1, scale = 0.1 and C = 1.
+plot(svm_Poly)
+
+# standardizes test data the same way as the training data 
+test_pred_svmPoly <- predict(svm_Poly, newdata = testing_imp)
+# test_pred_svmPoly
+
+# API: confusionMatrix(actual, predicted, cutoff = 0.5)
+confusionMatrix(testing_imp$expire_flag, test_pred_svmPoly, positive="Y")
+
+rfProbs_svmPoly <- predict(svm_Poly, testing_imp, type = "prob")
+rfROC_svmPoly <- roc(testing_imp$expire_flag, rfProbs_svmPoly[, "Y"])
+plot.roc(rfROC_svmPoly, print.auc=TRUE, legacy.axes=TRUE) 
+# AUC = 0.686
+```
+## SVM - RBF/Radial
+```{r}
+set.seed(2033)
+
+trctrl_svmRadial <- trainControl(summaryFunction=twoClassSummary,classProbs = TRUE,# Use AUC to pick the best model
+                                 savePredictions = T, method = "repeatedcv", number = 5)
+
+svmRadialGrid <- expand.grid(sigma= 2^c(-15,-10, -5, 0), C= 2^c(0:5))
+
+svm_Radial_Grid <- train(expire_flag ~., data = training_imp, method = "svmRadial",
+                         trControl=trctrl_svmRadial,
+                         preProcess = c("center", "scale"),
+                         metric="ROC",
+                         tuneGrid = svmRadialGrid,
+                         tuneLength = 10)
+svm_Radial_Grid
+#sigma = 0.0009765625 and C = 16
+plot(svm_Radial_Grid)
+
+# standardizes test data the same way as the training data 
+test_pred_svmRadial <- predict(svm_Radial_Grid, newdata = testing_imp)
+
+confusionMatrix(testing_imp$expire_flag, test_pred_svmRadial, positive="Y")
+
+rfProbs_svmRadial <- predict(svm_Radial_Grid, testing_imp, type = "prob")
+rfROC_svmRadial <- roc(testing_imp$expire_flag, rfProbs_svmRadial[, "Y"])
+plot.roc(rfROC_svmRadial, print.auc=TRUE, legacy.axes=TRUE) 
+# AUC = 0.688
+```
+## Random Forest
+```{r}
+set.seed(3011)
+trctrl_rf <- trainControl(summaryFunction=twoClassSummary,classProbs = TRUE,# Use AUC to pick the best model
+                          savePredictions = T,method = "repeatedcv", number = 5, repeats = 3)
+
+model_rf <- train(expire_flag ~., data = training_imp, method = "rf",
+                  trControl=trctrl_rf,
+                  metric="ROC",
+                  tuneLength = 10)
+model_rf
+# mtry = 6.
+
+# standardizes test data the same way as the training data 
+test_pred_rf <- predict(model_rf, newdata = testing_imp)
+# test_pred
+confusionMatrix(testing_imp$expire_flag, test_pred_rf, positive="Y")
+
+# ROC curve
+rfProbs_rf <- predict(model_rf, testing_imp, type = "prob")
+# If NAs, can set na.rm=TRUE:
+rfROC_rf <- roc(testing_imp$expire_flag, rfProbs_rf[, "Y"])
+plot.roc(rfROC_rf, print.auc=TRUE, legacy.axes=TRUE)  
+#AUC = 0.705
+
+# ALT: Tune mtry ### better model bestMtry than model_rf
+bestMtry <- tuneRF(training_imp[,c(1:4,6:10)], training_imp[,5], stepFactor = 1.5, improve = 1e-5, ntree = 500, doBest=TRUE)
+bestMtry
+# mtry = 2 
+
+#importance plot for best rf model
+varImpPlot(bestMtry)
+
+# Predict test data after tuning, for confusion matrix:
+test_pred_rfbest <- predict(bestMtry, newdata = testing_imp)
+#test_pred_rfbest
+confusionMatrix(testing_imp$expire_flag, test_pred_rfbest, positive="Y")
+
+# ROC curve
+rfProbs_rf <- predict(bestMtry, testing_imp, type = "prob")
+# If NAs, can set na.rm=TRUE:
+rfROC_rf <- roc(testing_imp$expire_flag, rfProbs_rf[, "Y"])
+plot.roc(rfROC_rf, print.auc=TRUE, legacy.axes=TRUE)  
+#AUC = 0.710
+```
+# Conclusions
+```{r}
+rfROC_net
+rfROC_svmlinear
+rfROC_svmPoly
+rfROC_svmRadial
+rfROC_rf
+
+# The highest to lowest AUC is shown below for all models used above along with other model evaluation metrics:
+# 1) Random Forest: AUC = 0.710
+                  # Accuracy : 0.6773
+                  # Sensitivity : 0.7075          
+                  # Specificity : 0.6022
+# 2) Elastic net: AUC = 0.7021
+            # Accuracy : 0.6714
+            # Sensitivity : 0.8225          
+            # Specificity : 0.4266 
+
+# 3) SVM - Radial: AUC = 0.6876
+                # Accuracy : 0.6392 
+                # Sensitivity : 0.6941         
+                # Specificity : 0.5307
+# 4) SVM - Poly: AUC = 0.6862
+            # Accuracy : 0.6298
+            # Sensitivity : 0.6940          
+            # Specificity : 0.5156
+# 5) SVM - Linear: AUC = 0.6862
+              # Accuracy : 0.6244
+              # Sensitivity : 0.6930          
+              # Specificity : 0.5079
+
+# The best model is ranfom forest for this dataset, it has better AUC, accuracy and good predictions compared to all other models
+# Elastic net is second best, however it has very less specificity, which could lead to more false positive predictions.
+```
