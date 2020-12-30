@@ -3,8 +3,10 @@ title: "Mimic_Proj_PnuemoniaInfluenza"
 author: "kd91"
 date: "5/15/2020"
 output:
-  html_document: default
+  html_document:
+    df_print: paged
   pdf_document: default
+  word_document: default
 ---
 # Importing Data into R
 ```{r}
@@ -19,7 +21,7 @@ library(kernlab)
 library(rpart.plot)
 library(pROC)
 
-setwd("~/Documents/KHUSHBU/MS/Spring2020/614_CDSS/MIMIC 3 Project")
+setwd(getwd())
 
 df0 <- read.csv(file="data_pneumoniacohort.csv", header=TRUE)
 ```
