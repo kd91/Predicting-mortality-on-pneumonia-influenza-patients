@@ -2,7 +2,11 @@
 title: "Mimic_Proj_PnuemoniaInfluenza"
 author: "kd91"
 date: "5/15/2020"
-output: rmarkdown::github_document
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
 ---
 # Importing Data into R
 ```{r}
